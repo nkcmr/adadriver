@@ -3,8 +3,9 @@ package scd4x // import "code.nkcmr.net/adadriver/scd4x"
 import (
 	"bytes"
 	"encoding/binary"
-	"errors"
 	"fmt"
+	"io"
+	"io/ioutil"
 	"log"
 	"math"
 	"sync"
@@ -13,59 +14,57 @@ import (
 	"periph.io/x/conn/v3/i2c"
 )
 
-// ErrPeriodicMeasurementRunning is returned if the sensor is running periodic
-// measurements
-var ErrPeriodicMeasurementRunning = errors.New("cannot execute this command while periodic measurements are running")
-
 // SCD41I2CAddr is the default address for the SCD-41 sensor
 const SCD41I2CAddr = 0x62
 
-const _SCD4X_REINIT = 0x3646
-const _SCD4X_FACTORYRESET = 0x3632
-const _SCD4X_FORCEDRECAL = 0x362F
-const _SCD4X_SELFTEST = 0x3639
-const _SCD4X_DATAREADY = 0xE4B8
-const _SCD4X_STOPPERIODICMEASUREMENT = 0x3F86
-const _SCD4X_STARTPERIODICMEASUREMENT = 0x21B1
-const _SCD4X_STARTLOWPOWERPERIODICMEASUREMENT = 0x21AC
-const _SCD4X_READMEASUREMENT = 0xEC05
-const _SCD4X_SERIALNUMBER = 0x3682
-const _SCD4X_GETTEMPOFFSET = 0x2318
-const _SCD4X_SETTEMPOFFSET = 0x241D
-const _SCD4X_GETALTITUDE = 0x2322
-const _SCD4X_SETALTITUDE = 0x2427
-const _SCD4X_SETPRESSURE = 0xE000
-const _SCD4X_PERSISTSETTINGS = 0x3615
-const _SCD4X_GETASCE = 0x2313
-const _SCD4X_SETASCE = 0x2416
-const _SCD4X_MEASURE_SINGLE_SHOT = 0x219D
-const _SCD4X_MEASURE_SINGLE_SHOT_RHT_ONLY = 0x2196
+var localLog = log.New(ioutil.Discard, "[scd4x_driver] ", log.Lmicroseconds)
 
-type SCD4x struct {
-	b         *i2c.Dev
-	pmRunning bool // periodic measurement running?
+// SetLogOutput sets the output for the debug log to the provided writer.
+// os.Stderr is a good choice if there is confusion about what to use.
+//
+// ioutil.Discard can be passed to disable logging again.
+func SetLogOutput(w io.Writer) {
+	localLog.SetOutput(w)
 }
 
-// DriverOption is a way to modify the behavior of the driver
-type DriverOption func(*SCD4x) error
+const (
+	_SCD4X_REINIT                           = 0x3646
+	_SCD4X_FACTORYRESET                     = 0x3632
+	_SCD4X_FORCEDRECAL                      = 0x362F
+	_SCD4X_SELFTEST                         = 0x3639
+	_SCD4X_DATAREADY                        = 0xE4B8
+	_SCD4X_STOPPERIODICMEASUREMENT          = 0x3F86
+	_SCD4X_STARTPERIODICMEASUREMENT         = 0x21B1
+	_SCD4X_STARTLOWPOWERPERIODICMEASUREMENT = 0x21AC
+	_SCD4X_READMEASUREMENT                  = 0xEC05
+	_SCD4X_SERIALNUMBER                     = 0x3682
+	_SCD4X_GETTEMPOFFSET                    = 0x2318
+	_SCD4X_SETTEMPOFFSET                    = 0x241D
+	_SCD4X_GETALTITUDE                      = 0x2322
+	_SCD4X_SETALTITUDE                      = 0x2427
+	_SCD4X_SETPRESSURE                      = 0xE000
+	_SCD4X_PERSISTSETTINGS                  = 0x3615
+	_SCD4X_GETASCE                          = 0x2313
+	_SCD4X_SETASCE                          = 0x2416
+	_SCD4X_MEASURE_SINGLE_SHOT              = 0x219D
+	_SCD4X_MEASURE_SINGLE_SHOT_RHT_ONLY     = 0x2196
+)
+
+// SCD4x is the instance of a particular sensor.
+type SCD4x struct {
+	b *i2c.Dev
+}
 
 var mutex sync.Mutex
 
 // Open will initialize a SCD-4x sensor
-func Open(i2cAddr uint16, bus i2c.Bus, opts ...DriverOption) (*SCD4x, error) {
+func Open(i2cAddr uint16, bus i2c.Bus) *SCD4x {
 	mutex.Lock()
 	defer mutex.Unlock()
 
 	dev := &i2c.Dev{Addr: i2cAddr, Bus: bus}
 
-	s := &SCD4x{b: dev}
-	mutex.Unlock()
-	if err := s.StopPeriodicMeasurement(); err != nil {
-		mutex.Lock()
-		return nil, err
-	}
-	mutex.Lock()
-	return s, nil
+	return &SCD4x{b: dev}
 }
 
 // StartPeriodicMeasurement starts periodic measurement, signal update interval
@@ -73,9 +72,7 @@ func Open(i2cAddr uint16, bus i2c.Bus, opts ...DriverOption) (*SCD4x, error) {
 func (s *SCD4x) StartPeriodicMeasurement() error {
 	mutex.Lock()
 	defer mutex.Unlock()
-	log.Printf("%T: StartPeriodicMeasurement", s)
-
-	s.pmRunning = true
+	localLog.Printf("%T: StartPeriodicMeasurement", s)
 
 	if err := s.sendCommand(_SCD4X_STARTPERIODICMEASUREMENT, -1); err != nil {
 		return fmt.Errorf("_SCD4X_STARTPERIODICMEASUREMENT failed: %w", err)
@@ -99,7 +96,7 @@ func (s *SCD4x) ReadMeasurement() (Measurement, error) {
 	mutex.Lock()
 	defer mutex.Unlock()
 
-	log.Printf("%T: ReadMeasurement", s)
+	localLog.Printf("%T: ReadMeasurement", s)
 
 	if err := s.sendCommand(_SCD4X_READMEASUREMENT, time.Millisecond); err != nil {
 		return Measurement{}, fmt.Errorf("_SCD4X_READMEASUREMENT failed: %w", err)
@@ -142,12 +139,10 @@ func (s *SCD4x) StopPeriodicMeasurement() error {
 	mutex.Lock()
 	defer mutex.Unlock()
 
-	log.Printf("%T: stopPeriodicMeasurement", s)
+	localLog.Printf("%T: stopPeriodicMeasurement", s)
 	if err := s.sendCommand(_SCD4X_STOPPERIODICMEASUREMENT, time.Millisecond*500); err != nil {
 		return fmt.Errorf("_SCD4X_STOPPERIODICMEASUREMENT failed: %w", err)
 	}
-
-	s.pmRunning = false
 
 	return nil
 }
@@ -172,11 +167,7 @@ func (s *SCD4x) StopPeriodicMeasurement() error {
 func (s *SCD4x) SetTemperatureOffset(offset uint16) error {
 	mutex.Lock()
 	defer mutex.Unlock()
-	log.Printf("%T: SetTemperatureOffset", s)
-
-	if s.pmRunning {
-		return ErrPeriodicMeasurementRunning
-	}
+	localLog.Printf("%T: SetTemperatureOffset", s)
 
 	if err := s.sendCommandArg(_SCD4X_SETTEMPOFFSET, offset, time.Millisecond); err != nil {
 		return fmt.Errorf("_SCD4X_SETTEMPERATUREOFFSET failed: %w", err)
@@ -189,11 +180,7 @@ func (s *SCD4x) SetTemperatureOffset(offset uint16) error {
 func (s *SCD4x) GetTemperatureOffset() (uint16, error) {
 	mutex.Lock()
 	defer mutex.Unlock()
-	log.Printf("%T: GetTemperatureOffset", s)
-
-	if s.pmRunning {
-		return 0, ErrPeriodicMeasurementRunning
-	}
+	localLog.Printf("%T: GetTemperatureOffset", s)
 
 	if err := s.sendCommand(_SCD4X_GETTEMPOFFSET, time.Millisecond); err != nil {
 		return 0, fmt.Errorf("_SCD4X_GETTEMPOFFSET failed: %w", err)
@@ -221,11 +208,7 @@ func (s *SCD4x) GetTemperatureOffset() (uint16, error) {
 func (s *SCD4x) SetSensorAltitude(masl uint16) error {
 	mutex.Lock()
 	defer mutex.Unlock()
-	log.Printf("%T: SetSensorAltitude", s)
-
-	if s.pmRunning {
-		return ErrPeriodicMeasurementRunning
-	}
+	localLog.Printf("%T: SetSensorAltitude", s)
 
 	if err := s.sendCommandArg(_SCD4X_SETALTITUDE, masl, time.Millisecond); err != nil {
 		return fmt.Errorf("_SCD4X_SETALTITUDE failed: %w", err)
@@ -238,11 +221,7 @@ func (s *SCD4x) SetSensorAltitude(masl uint16) error {
 func (s *SCD4x) GetSensorAltitude() (uint16, error) {
 	mutex.Lock()
 	defer mutex.Unlock()
-	log.Printf("%T: GetSensorAltitude", s)
-
-	if s.pmRunning {
-		return 0, ErrPeriodicMeasurementRunning
-	}
+	localLog.Printf("%T: GetSensorAltitude", s)
 
 	if err := s.sendCommand(_SCD4X_GETALTITUDE, time.Millisecond); err != nil {
 		return 0, fmt.Errorf("_SCD4X_GETALTITUDE failed: %w", err)
@@ -272,7 +251,7 @@ func (s *SCD4x) GetSensorAltitude() (uint16, error) {
 func (s *SCD4x) SetAmbientPressure(hpa uint16) error {
 	mutex.Lock()
 	defer mutex.Unlock()
-	log.Printf("%T: SetAmbientPressure(%d)", s, hpa)
+	localLog.Printf("%T: SetAmbientPressure(%d)", s, hpa)
 
 	if err := s.sendCommandArg(_SCD4X_SETPRESSURE, hpa, time.Millisecond); err != nil {
 		return fmt.Errorf("_SCD4X_SETAMBIENTPRESSURE failed: %w", err)
@@ -301,11 +280,7 @@ func (s *SCD4x) SetAmbientPressure(hpa uint16) error {
 func (s *SCD4x) PerformForcedRecalibration(targetCO2Concetration uint16) (frcCorrection uint16, _ error) {
 	mutex.Lock()
 	defer mutex.Unlock()
-	log.Printf("%T: PerformForcedRecalibration(0x%x)", s, targetCO2Concetration)
-
-	if s.pmRunning {
-		return 0, ErrPeriodicMeasurementRunning
-	}
+	localLog.Printf("%T: PerformForcedRecalibration(0x%x)", s, targetCO2Concetration)
 
 	if err := s.sendCommandArg(_SCD4X_FORCEDRECAL, targetCO2Concetration, time.Millisecond*400); err != nil {
 		return 0, fmt.Errorf("_SCD4X_FORCEDRECAL failed: %w", err)
@@ -333,11 +308,7 @@ func (s *SCD4x) PerformForcedRecalibration(targetCO2Concetration uint16) (frcCor
 func (s *SCD4x) SetAutomaticSelfCalibrationEnabled(enabled bool) error {
 	mutex.Lock()
 	defer mutex.Unlock()
-	log.Printf("%T: SetAutomaticSelfCalibration(%t)", s, enabled)
-
-	if s.pmRunning {
-		return ErrPeriodicMeasurementRunning
-	}
+	localLog.Printf("%T: SetAutomaticSelfCalibration(%t)", s, enabled)
 
 	arg := uint16(0)
 	if enabled {
@@ -355,11 +326,7 @@ func (s *SCD4x) SetAutomaticSelfCalibrationEnabled(enabled bool) error {
 func (s *SCD4x) GetAutomaticSelfCalibrationEnabled() (bool, error) {
 	mutex.Lock()
 	defer mutex.Unlock()
-	log.Printf("%T: GetAutomaticSelfCalibrationEnabled", s)
-
-	if s.pmRunning {
-		return false, ErrPeriodicMeasurementRunning
-	}
+	localLog.Printf("%T: GetAutomaticSelfCalibrationEnabled", s)
 
 	if err := s.sendCommand(_SCD4X_GETASCE, time.Millisecond); err != nil {
 		return false, fmt.Errorf("_SCD4X_GETASCE failed: %w", err)
@@ -384,9 +351,7 @@ func (s *SCD4x) GetAutomaticSelfCalibrationEnabled() (bool, error) {
 func (s *SCD4x) StartLowPowerPeriodicMeasurement() error {
 	mutex.Lock()
 	defer mutex.Unlock()
-	log.Printf("%T: StartLowPowerPeriodicMeasurement", s)
-
-	s.pmRunning = true
+	localLog.Printf("%T: StartLowPowerPeriodicMeasurement", s)
 
 	if err := s.sendCommand(_SCD4X_STARTLOWPOWERPERIODICMEASUREMENT, -1); err != nil {
 		return fmt.Errorf("_SCD4X_STARTLOWPOWERPERIODICMEASUREMENT failed: %w", err)
@@ -399,7 +364,7 @@ func (s *SCD4x) StartLowPowerPeriodicMeasurement() error {
 func (s *SCD4x) GetDataReadyStatus() (bool, error) {
 	mutex.Lock()
 	defer mutex.Unlock()
-	log.Printf("%T: getDataReadyStatus", s)
+	localLog.Printf("%T: getDataReadyStatus", s)
 
 	if err := s.sendCommand(_SCD4X_DATAREADY, time.Millisecond); err != nil {
 		return false, fmt.Errorf("failed to send send data ready command: %w", err)
@@ -408,7 +373,7 @@ func (s *SCD4x) GetDataReadyStatus() (bool, error) {
 	if err != nil {
 		return false, fmt.Errorf("failed to read raw data: %w", err)
 	}
-	log.Printf("%T: getDataReadStatus: sensory reply: %#v", s, _buf)
+	localLog.Printf("%T: getDataReadStatus: sensory reply: %#v", s, _buf)
 	buf := bytes.NewBuffer(_buf)
 	_ready, err := readValid16(buf)
 	if err != nil {
@@ -431,11 +396,7 @@ func (s *SCD4x) GetDataReadyStatus() (bool, error) {
 func (s *SCD4x) PersistSettings() error {
 	mutex.Lock()
 	defer mutex.Unlock()
-	log.Printf("%T: PersistSettings", s)
-
-	if s.pmRunning {
-		return ErrPeriodicMeasurementRunning
-	}
+	localLog.Printf("%T: PersistSettings", s)
 
 	if err := s.sendCommand(_SCD4X_PERSISTSETTINGS, time.Millisecond*800); err != nil {
 		return fmt.Errorf("failed to send persist settings command: %w", err)
@@ -451,11 +412,7 @@ func (s *SCD4x) PersistSettings() error {
 func (s *SCD4x) GetSerialNumber() (uint64, error) {
 	mutex.Lock()
 	defer mutex.Unlock()
-	log.Printf("%T: GetSerialNumber", s)
-
-	if s.pmRunning {
-		return 0, ErrPeriodicMeasurementRunning
-	}
+	localLog.Printf("%T: GetSerialNumber", s)
 
 	if err := s.sendCommand(_SCD4X_SERIALNUMBER, time.Millisecond); err != nil {
 		return 0, fmt.Errorf("failed to send get serial number command: %w", err)
@@ -480,11 +437,7 @@ func (s *SCD4x) GetSerialNumber() (uint64, error) {
 func (s *SCD4x) PerformSelfTest() error {
 	mutex.Lock()
 	defer mutex.Unlock()
-	log.Printf("%T: PerformSelfTest", s)
-
-	if s.pmRunning {
-		return ErrPeriodicMeasurementRunning
-	}
+	localLog.Printf("%T: PerformSelfTest", s)
 
 	if err := s.sendCommand(_SCD4X_SELFTEST, time.Millisecond*10_000); err != nil {
 		return fmt.Errorf("_SCD4X_SELFTEST failed: %w", err)
@@ -509,11 +462,7 @@ func (s *SCD4x) PerformSelfTest() error {
 func (s *SCD4x) PerformFactoryReset() error {
 	mutex.Lock()
 	defer mutex.Unlock()
-	log.Printf("%T: performFactoryReset", s)
-
-	if s.pmRunning {
-		return ErrPeriodicMeasurementRunning
-	}
+	localLog.Printf("%T: performFactoryReset", s)
 
 	if err := s.sendCommand(_SCD4X_FACTORYRESET, time.Millisecond*1200); err != nil {
 		return fmt.Errorf("_SCD4X_FACTORYRESET failed: %w", err)
@@ -529,11 +478,7 @@ func (s *SCD4x) PerformFactoryReset() error {
 func (s *SCD4x) Reinit() error {
 	mutex.Lock()
 	defer mutex.Unlock()
-	log.Printf("%T: Reinit", s)
-
-	if s.pmRunning {
-		return ErrPeriodicMeasurementRunning
-	}
+	localLog.Printf("%T: Reinit", s)
 
 	if err := s.sendCommand(_SCD4X_REINIT, time.Millisecond*20); err != nil {
 		return fmt.Errorf("_SCD4X_REINIT failed: %w", err)
@@ -548,11 +493,7 @@ func (s *SCD4x) Reinit() error {
 func (s *SCD4x) MeasureSingleShot() error {
 	mutex.Lock()
 	defer mutex.Unlock()
-	log.Printf("%T: MeasureSingleShot", s)
-
-	if s.pmRunning {
-		return ErrPeriodicMeasurementRunning
-	}
+	localLog.Printf("%T: MeasureSingleShot", s)
 
 	if err := s.sendCommand(_SCD4X_MEASURE_SINGLE_SHOT, time.Millisecond*5000); err != nil {
 		return fmt.Errorf("_SCD41_MEASURE_SINGLE_SHOT failed: %w", err)
@@ -567,11 +508,7 @@ func (s *SCD4x) MeasureSingleShot() error {
 func (s *SCD4x) MeasureSingleShotRHTOnly() error {
 	mutex.Lock()
 	defer mutex.Unlock()
-	log.Printf("%T: MeasureSingleShotRHTOnly", s)
-
-	if s.pmRunning {
-		return ErrPeriodicMeasurementRunning
-	}
+	localLog.Printf("%T: MeasureSingleShotRHTOnly", s)
 
 	if err := s.sendCommand(_SCD4X_MEASURE_SINGLE_SHOT_RHT_ONLY, time.Millisecond*50); err != nil {
 		return fmt.Errorf("_SCD41_MEASURE_SINGLE_SHOT_RHT_ONLY failed: %w", err)
@@ -589,7 +526,7 @@ func (s *SCD4x) readData(len int) ([]byte, error) {
 }
 
 func (s *SCD4x) sendCommand(cmd uint16, sleep time.Duration) error {
-	log.Printf("%T: sendCommand: 0x%x", s, cmd)
+	localLog.Printf("%T: sendCommand: 0x%x", s, cmd)
 	cmdData := make([]byte, 2)
 	binary.BigEndian.PutUint16(cmdData, cmd)
 	if err := s.writeAndWait(cmdData, sleep); err != nil {
@@ -599,7 +536,7 @@ func (s *SCD4x) sendCommand(cmd uint16, sleep time.Duration) error {
 }
 
 func (s *SCD4x) sendCommandArg(cmd uint16, arg uint16, sleep time.Duration) error {
-	log.Printf("%T: sendCommandArg: cmd=0x%x arg=0x%x", s, cmd, arg)
+	localLog.Printf("%T: sendCommandArg: cmd=0x%x arg=0x%x", s, cmd, arg)
 	cmdData := make([]byte, 2)
 	argData := make([]byte, 2)
 	binary.BigEndian.PutUint16(cmdData, cmd)
@@ -609,12 +546,12 @@ func (s *SCD4x) sendCommandArg(cmd uint16, arg uint16, sleep time.Duration) erro
 }
 
 func (s *SCD4x) writeAndWait(data []byte, sleep time.Duration) error {
-	log.Printf("%T: writeAndWait: %#v", s, data)
+	localLog.Printf("%T: writeAndWait: %#v", s, data)
 	if err := s.b.Tx(data, nil); err != nil {
 		return err
 	}
 	if sleep > time.Second {
-		log.Printf("%T: writeAndWait: waiting %s for response", s, sleep)
+		localLog.Printf("%T: writeAndWait: waiting %s for response", s, sleep)
 	}
 	time.Sleep(sleep)
 	return nil
